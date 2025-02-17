@@ -56,6 +56,7 @@
 #include <sys/time.h>
 #include <assert.h>
 
+
 static double
 timestamp() {
   struct timeval tv;
@@ -102,32 +103,74 @@ HPCC_starts(int64_t n)
 }
 
 
+#ifdef __amd64__
+#include <x86intrin.h>
+#define N_RAND 8
+
+static void
+RandomAccessUpdate(uint64_t TableSize, uint64_t *Table) {
+  uint64_t ran[N_RAND];              /* Current random numbers */
+  uint64_t tt[N_RAND];
+  
+  const __m512i v_tablesz = _mm512_set1_epi64(TableSize-1);
+  const __m512i v_poly = _mm512_set1_epi64(POLY);
+  
+  for (int j=0; j<N_RAND; j++) {
+    ran[j] = HPCC_starts ((NUPDATE/N_RAND) * j);
+  }
+
+  __m512i v_ran = _mm512_loadu_epi64(ran);
+
+  
+  for (uint64_t i=0; i<NUPDATE/N_RAND; i++) {
+    
+    __m512i v_temp = _mm512_slli_epi64 (v_ran, 1);
+    __mmask8 kk = _mm512_cmp_epi64_mask(v_ran, _mm512_set1_epi64(0), _MM_CMPINT_LT);
+    __m512i v_temp2 = _mm512_mask_mov_epi64(_mm512_set1_epi64(0) ,kk,  v_poly);
+    v_ran = _mm512_xor_epi64(v_temp,  v_temp2);
+    
+    for(int j = 0; j < N_RAND; j++) {
+      ran[j] = (ran[j] << 1) ^ ( (int64_t) ran[j] < 0 ? POLY : 0);
+    }
+
+    /* _mm512_storeu_epi64(tt, v_ran); */
+
+    /* for(int j = 0; j < N_RAND; j++) { */
+    /*   printf("%d : tt = %lu, ran = %lu\n", j, tt[j], ran[j]); */
+    /*   assert(tt[j] == ran[j]); */
+    /* } */
+    
+    
+    __m512i v_index = _mm512_and_epi64(v_ran, v_tablesz);
+    __m512i v_load = _mm512_i64gather_epi64(v_index, Table, 8);
+    v_load = _mm512_xor_epi64(v_load, v_ran);
+    _mm512_i64scatter_epi64(Table, v_index, v_load, 8);
+    //Table[ran[j] & (TableSize-1)] ^= ran[j];
+  }
+  
+}
+#else
+#define N_RAND 128
 static void
 RandomAccessUpdate(uint64_t TableSize, uint64_t *Table) {
   uint64_t i;
-  uint64_t ran[128];              /* Current random numbers */
+  uint64_t ran[N_RAND];     
   int j;
 
-  /* Perform updates to main table.  The scalar equivalent is:
-   *
-   *     uint64_t ran;
-   *     ran = 1;
-   *     for (i=0; i<NUPDATE; i++) {
-   *       ran = (ran << 1) ^ (((s64Int) ran < 0) ? POLY : 0);
-   *       table[ran & (TableSize-1)] ^= ran;
-   *     }
-   */
-  for (j=0; j<128; j++) {
-    ran[j] = HPCC_starts ((NUPDATE/128) * j);
+  for (j=0; j<N_RAND; j++) {
+    ran[j] = HPCC_starts ((NUPDATE/N_RAND) * j);
   }
   
-  for (i=0; i<NUPDATE/128; i++) {
-    for (j=0; j<128; j++) {
-      ran[j] = (ran[j] << 1) ^ ((int64_t) ran[j] < 0 ? POLY : 0);
+  for (i=0; i<NUPDATE/N_RAND; i++) {
+    
+    for (j=0; j<N_RAND; j++) {
+      ran[j] = (ran[j] << 1) ^ ( (int64_t) ran[j] < 0 ? POLY : 0);
       Table[ran[j] & (TableSize-1)] ^= ran[j];
     }
   }
 }
+#endif
+
 
 int main(int argc, char *argv[]) {
   uint64_t i;
